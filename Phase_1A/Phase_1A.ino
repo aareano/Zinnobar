@@ -1,4 +1,6 @@
-int yLedPin = 2;
+#include "TimerOne.h"
+
+int bLedPin = 5;
 int rLedPin = 33;
 int gLedPin = 3;
 
@@ -8,23 +10,27 @@ int switch2Pin = 21;
 int pot1Pin = 15;
 int pot2Pin = 13;
 
-int loops = 0;
 int brightness = 255;
 
+// machine state data
 enum State { STATE_OFF, STATE_ON, STATE_RUN, STATE_SLEEP, STATE_DIAGNOSTIC };
-enum RunState { RUN_FADE, RUN_BLINK1, RUN_BLINK2 };
-enum SleepState { SLEEP_FADE, SLEEP_BLINK };
-
 State currState;
-RunState runState;
 
+// run state data
+enum RunState { RUN_FADE, RUN_BLINK1, RUN_BLINK2 };
+RunState runState;
+bool blueLedFast = false; // false => 500000, true => 100000.
+bool interruptSet = false;
+
+// sleep state data
+enum SleepState { SLEEP_FADE, SLEEP_BLINK };
 SleepState sleepState;
 int sleepBlinkCnt = 0;
 
 int diagnosticBlinkCnt = random(10);
 
 void setup() {
-  pinMode(yLedPin, OUTPUT);
+  pinMode(bLedPin, OUTPUT);
   pinMode(rLedPin, OUTPUT);
   pinMode(gLedPin, OUTPUT);
 
@@ -33,9 +39,12 @@ void setup() {
   pinMode(switch2Pin, INPUT);
   attachInterrupt(digitalPinToInterrupt(switch2Pin), switch2ISR, FALLING);
 
-  currState = STATE_DIAGNOSTIC;
+  currState = STATE_RUN;
+
+  // run state data
   runState = RUN_FADE;
-  
+
+  // sleep state data
   sleepState = SLEEP_BLINK;
 
   Serial.begin(9600);
@@ -45,92 +54,143 @@ void loop() {
   
   switch(currState) {
     case STATE_OFF:
-      clearLeds();
-      currState = STATE_ON;
+      state_off();
       break;
-      
     case STATE_ON:
-      blinkDigLed(gLedPin, 10);
+      state_on();
       break;
-      
     case STATE_RUN:
-      
-      switch (runState) {
-        case RUN_FADE:
-          if (fadeLed(gLedPin, 6) == 0) {
-            runState = RUN_BLINK1;
-          }
-          break;
-        case RUN_BLINK1:
-          blinkAnalogLed(gLedPin, 1);
-          runState = RUN_BLINK2;
-          break;
-        case RUN_BLINK2:
-          blinkAnalogLed(gLedPin, 1);
-          runState = RUN_FADE;
-          break;
-      }
+      state_run();
       break;
-      
     case STATE_SLEEP:
-      
-      switch (sleepState) {
-        case SLEEP_BLINK:
-          if (sleepBlinkCnt < 3) {
-            sleepBlinkCnt++;
-            blinkAnalogLed(yLedPin, 4);
-          } else {
-            sleepBlinkCnt = 0;
-          sleepState = SLEEP_FADE;
-          }
-          break;
-        case SLEEP_FADE:
-          if (fadeLed(yLedPin, 1) == 0) {
-            sleepState = SLEEP_BLINK;       // REPEAT sleep cycle
-          }
-          break;
-      }
-      break;      
-
+      state_sleep();
+      break;
     case STATE_DIAGNOSTIC:
-      if (diagnosticBlinkCnt-- > 0) {
-        blinkDigLed(rLedPin, 3);
-      } else {
-        changeState(STATE_SLEEP, currState);
-      }
+      state_diagnostic();
       break;
     default:
       Serial.print("Everything is broken");
   }
 }
 
+void state_off() {
+  clearLeds();
+  currState = STATE_ON;
+}
+
+void state_on() {
+  blinkDigLed(gLedPin, 10);
+}
+
+void state_run() {
+  // blink blue LED
+  if (interruptSet == false) {
+    Timer1.initialize(500000);   // variable not working
+    Timer1.pwm(9, 512);
+    Timer1.attachInterrupt(toggleBlue);
+    interruptSet = true;
+  }
+
+  int rate = 1;
+  
+  switch (runState) {
+    case RUN_FADE:
+      if (fadeLed(gLedPin, 6) == 0) {
+        runState = RUN_BLINK1;
+      }
+      break;
+    case RUN_BLINK1:
+      rate = analogRead(pot1Pin) > 512 ? 1 : 9;
+      blinkAnalogLed(gLedPin, rate);
+      runState = RUN_BLINK2;
+      break;
+    case RUN_BLINK2:
+      rate = analogRead(pot1Pin) > 512 ? 1 : 9;
+      blinkAnalogLed(gLedPin, rate);
+      runState = RUN_FADE;
+      break;
+  }
+}
+
+void state_sleep() {
+  switch (sleepState) {
+    case SLEEP_BLINK:
+      if (sleepBlinkCnt < 3) {
+        sleepBlinkCnt++;
+        blinkAnalogLed(bLedPin, 4);
+      } else {
+        sleepBlinkCnt = 0;
+        sleepState = SLEEP_FADE;
+      }
+      break;
+    case SLEEP_FADE:
+      if (fadeLed(bLedPin, 1) == 0) {
+        sleepState = SLEEP_BLINK;       // REPEAT sleep cycle
+      }
+      break;
+  }
+}
+
+void state_diagnostic() {
+  if (diagnosticBlinkCnt-- > 0) {
+    blinkDigLed(rLedPin, 3);
+  } else {
+    changeState(STATE_SLEEP, currState);
+  }
+}
+
+
+////////////////// HELPER FUNCTIONS /////////////////////
+
+
 void changeState(State next, State prev) {
   if (prev == STATE_RUN) {
     runState = RUN_FADE;
-  }
-  if (prev == STATE_SLEEP) {
+    interruptSet = false;
+    Timer1.detachInterrupt();
+  } else if (prev == STATE_SLEEP) {
     sleepState = SLEEP_BLINK;
     sleepBlinkCnt = 0;
-  }
-  if (prev == STATE_DIAGNOSTIC) {
+  } else if (prev == STATE_DIAGNOSTIC) {
     diagnosticBlinkCnt = random(10);
   }
-
+  
   currState = next;
 }
 
 void switch1ISR() {
-  
+  Serial.print("switch1ISR\n");
+  if (!blueLedFast) {
+    Serial.print("changing blue blink rate\n");
+    Timer1.detachInterrupt();
+    blueLedFast = true;
+    
+    Timer1.initialize(100000);   // variable not working
+    Timer1.pwm(9, 512);
+    Timer1.attachInterrupt(toggleBlue);
+  }
 }
 
 void switch2ISR() {
-  
+  if (blueLedFast) {
+    digitalWrite(rLedPin, HIGH);
+  }
 }
 
 void clearLeds() {
   digitalWrite(rLedPin, LOW);
   digitalWrite(gLedPin, LOW);
-  analogWrite(yLedPin, 0);
+  analogWrite(bLedPin, 0);
+}
+
+void toggleBlue() {
+  if (analogRead(bLedPin) > 512) {
+    analogWrite(bLedPin, 0);
+  } else {
+    float level = analogRead(pot2Pin);
+    Serial.println(level);
+    analogWrite(bLedPin, level);
+  }
 }
 
 // only takes digital pins
